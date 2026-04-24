@@ -1,32 +1,25 @@
-# Tredence AI Engineering Internship 2026 (Self-Pruning Neural Network)
+# The Self-Pruning Neural Network
 
-A PyTorch implementation of a hybrid CNN + feed-forward neural network that **learns to prune itself during training** via learnable sigmoid gates and L1 sparsity regularisation — achieving **83.21% test accuracy on CIFAR-10** while pruning up to **88.1%** of classifier weights.
+A PyTorch implementation of a hybrid CNN + feed-forward neural network that **learns to prune itself during training** using an L1 sparsity penalty on learnable gate scores.
 
 ---
 
 ## Results
 
-| Lambda (λ) | Test Accuracy | Sparsity | Description |
-|:---:|:---:|:---:|:---|
-| `1e-6` | 83.21% | 15.2% | Mild pruning — most weights kept, good accuracy |
-| `5e-6` | 83.16% | 63.2% | Balanced pruning — strong accuracy with high sparsity |
-| `2e-5` | 82.36% | 88.1% | ✅ Best trade-off (highest acc×sparsity score) |
+Based on the experiments conducted in the Jupyter Notebook, the model achieved the following performance metrics on the CIFAR-10 dataset with different $\lambda$ values for the sparsity penalty:
 
-### Training Curves
-![Training Curves](results/training_curves.png)
+| $\lambda$ (Lambda) | Test Accuracy (%) | Sparsity Level (%) |
+|:------------------:|------------------:|-------------------:|
+| `1e-06`            | 79.41             | 0                  |
+| `5e-06`            | 78.69             | 0                  |
+| `1e-05`            | 78.24             | 0                  |
 
-### Gate Distributions — Best Model
-![Gate Distribution Best](results/best_gate_distribution.png)
+> **Interpretation of Initial Results**: The table above demonstrates that for very small values of $\lambda$ (e.g., `1e-06` to `1e-05`), the L1 penalty is too weak to force the gate scores below the $0.01$ threshold. The network prioritizes classification accuracy, achieving nearly 80% on CIFAR-10 after only a few epochs, but ignores the pruning objective. Higher $\lambda$ values are required to observe significant sparsity.
 
-> The bimodal distribution (spike at 0 = pruned, cluster near 1 = active) is the hallmark of successful self-pruning via L1 regularisation.
+### Gate Distributions
+![Gate Distribution](result_graph.png)
 
-<details>
-<summary>View other plots</summary>
-
-**Per-Layer Sparsity**
-![Per-Layer Sparsity](results/per_layer_sparsity.png)
-
-</details>
+> A successful self-pruning network exhibits a distinct shift in its gate value distribution, ideally with a spike at exactly $0.0$ indicating fully pruned connections. 
 
 ---
 
@@ -37,25 +30,25 @@ A PyTorch implementation of a hybrid CNN + feed-forward neural network that **le
       │
       ▼
   ┌─────────────────────────────────────────┐
-  │  ConvBackbone (VGG-Style 3-block CNN)   │
-  │  Block 1: Conv(3→64)   → BN → ReLU×2 → MaxPool  │
-  │  Block 2: Conv(64→128) → BN → ReLU×2 → MaxPool  │
-  │  Block 3: Conv(128→256)→ BN → ReLU×2 → MaxPool  │
-  │  GlobalAvgPool                          │
+  │  CNN Feature Extractor                  │
+  │  Conv2d(3→32)   → BN → ReLU → MaxPool2d │
+  │  Conv2d(32→64)  → BN → ReLU → MaxPool2d │
+  │  Conv2d(64→128) → BN → ReLU → MaxPool2d │
+  │  Flatten                                │
   └─────────────────────────────────────────┘
       │
       ▼
-  256-dim feature vector
+  2048-dim feature vector
       │
       ▼
   ┌─────────────────────────────────────────┐
-  │  PrunableLinear(256 → 512)              │  ← learnable gates
-  │  BatchNorm1d → ReLU → Dropout(0.4)      │
+  │  PrunableLinear(2048 → 512)             │  ← learnable gates
+  │  ReLU                                   │
   ├─────────────────────────────────────────┤
-  │  PrunableLinear(512 → 256)              │  ← learnable gates
-  │  BatchNorm1d → ReLU → Dropout(0.4)      │
+  │  PrunableLinear(512 → 128)              │  ← learnable gates
+  │  ReLU                                   │
   ├─────────────────────────────────────────┤
-  │  PrunableLinear(256 → 10)               │  ← learnable gates
+  │  PrunableLinear(128 → 10)               │  ← learnable gates
   └─────────────────────────────────────────┘
       │
       ▼
@@ -69,15 +62,15 @@ A PyTorch implementation of a hybrid CNN + feed-forward neural network that **le
 Every weight in the linear layers has a learnable **gate** parameter:
 
 ```python
-gate_ij        = sigmoid(gate_scores_ij)   # always in (0, 1)
-pruned_weight  = weight_ij  ×  gate_ij     # element-wise
-output         = x @ pruned_weight.T  +  bias
+gate_ij        = torch.sigmoid(gate_scores_ij)   # always in (0, 1)
+pruned_weights = weight_ij * gate_ij             # element-wise
+output         = F.linear(x, pruned_weights, bias)
 ```
 
 The **L1 sparsity loss** penalises the sum of all gate values:
 
 ```
-Total Loss = CrossEntropy(logits, labels) + λ × Σ sigmoid(gate_scores)
+Total Loss = CrossEntropy(outputs, labels) + λ × Σ |sigmoid(gate_scores)|
 ```
 
 **Why L1 drives gates to exactly zero (not just small):**
@@ -92,13 +85,12 @@ Total Loss = CrossEntropy(logits, labels) + λ × Σ sigmoid(gate_scores)
 
 | Technique | Detail |
 |---|---|
-| **Architecture** | VGG-style 3-block CNN + Gated MLP Head |
-| **Regularisation** | Dropout2d(0.1) + Dropout(0.4) |
-| **Augmentation** | RandomCrop, RandomHorizontalFlip, ColorJitter, RandomErasing |
-| **Loss** | Label-Smoothing Cross-Entropy (ε=0.1) + L1 Sparsity |
-| **Optimiser** | AdamW (lr=1e-3 for weights, 0.05 for gates) |
-| **LR Schedule** | OneCycleLR (Linear Warmup + Cosine Annealing) |
-| **Gate Initialisation**| +2.0 → σ(2) ≈ 0.88 (nearly open) |
+| **Architecture** | CNN Feature Extractor + Gated MLP Head |
+| **Regularisation** | BatchNorm2d + L1 Sparsity on Gates |
+| **Augmentation** | ToTensor, Normalize |
+| **Loss** | Cross-Entropy + L1 Sparsity |
+| **Optimiser** | Adam (lr=0.001) |
+| **Gate Initialisation**| Constant +2.0 → σ(2) ≈ 0.88 (mostly active) |
 
 ---
 
@@ -108,21 +100,15 @@ Total Loss = CrossEntropy(logits, labels) + λ × Σ sigmoid(gate_scores)
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the experiment
-python self_pruning_network.py
+# Run the notebook to see the experiment
+jupyter notebook self_pruning_nn.ipynb
 ```
 
 This will:
-- Download CIFAR-10 (first run only)
-- Train the self-pruning network with different λ values
-- Print a summary table comparing accuracy vs. sparsity
-- Save all plots and metrics to the `results/` directory
-
-**Custom Configuration:**
-```bash
-# Train for more epochs with custom lambdas
-python self_pruning_network.py --epochs 30 --lambdas 1e-6 5e-6 2e-5
-```
+- Download the CIFAR-10 dataset into `./data` (first run only)
+- Train the self-pruning network with $\lambda$ values of `1e-6`, `5e-6`, and `1e-5`
+- Print a summary table comparing test accuracy vs. sparsity level
+- Visualize the final gate value distribution
 
 ---
 
@@ -130,27 +116,13 @@ python self_pruning_network.py --epochs 30 --lambdas 1e-6 5e-6 2e-5
 
 ```
 .
-├── self_pruning_network.py   # Main script (model, training, evaluation, plotting)
-├── self_pruning_network_notebook (1).ipynb # Comprehensive Jupyter Notebook
-├── REPORT.md                 # Analysis report with results and explanation
-├── README.md                 # This file
+├── self_pruning_nn.ipynb     # Jupyter Notebook containing the full implementation and experiment loop
+├── self_pruning_report.md    # Detailed technical report analyzing the mechanism and results
 ├── requirements.txt          # Python dependencies
-└── results/                  # Generated after running (plots, metrics)
-    ├── training_curves.png
-    ├── per_layer_sparsity.png
-    ├── best_gate_distribution.png
-    └── results.json
+├── README.md                 # This file
+├── result_graph.png          # Extracted gate distribution visualization
+└── data/                     # Directory for CIFAR-10 dataset
 ```
-
----
-
-## Key Design Decisions
-
-**L1 on sigmoid outputs** (not on gate_scores directly): Penalising `sigmoid(gate_scores)` means the penalty is always bounded in `[0, 1]`, making λ interpretable as a fraction of the maximum possible sparsity penalty. The gradient flows cleanly through `sigmoid'` back into `gate_scores`.
-
-**Differential Learning Rates**: The optimizer uses a significantly larger learning rate (0.05) for the `gate_scores` compared to the base weights (1e-3). This allows the network to swiftly adapt the gates and decisively drop connections while steadily optimizing the remaining weights.
-
-**AdamW & OneCycleLR**: Decoupled weight decay gives better generalisation, and the OneCycleLR schedule (linear warmup + cosine annealing) is best-in-class for training CNNs efficiently.
 
 ---
 
